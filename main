@@ -45,7 +45,6 @@ struct settings {
   int usableCapacity = 90;
   uint8_t cellType = 1;
   uint8_t numberOfVESC = 2;    //7
-  uint8_t switchScreenDelay = 3;
   int totalDistance = 0;
 } monitorSettings;
 
