@@ -1,0 +1,211 @@
+#include "VescUart.h"
+
+VescUart UART;
+
+const float firmware = 1.0;
+  
+struct data {
+  float tempMosfet;
+  float tempMotor;
+  float avgMotorCurrent;
+  float avgInputCurrent;
+  float avgId;
+  float avgIq;
+  float dutyCycleNow;
+  long  rpm;
+  float inpVoltage;
+  
+  float avgCellVoltage;
+  float ampHours;
+  float wattHours;
+  
+  float batteryPower;
+  float motorPower;
+
+  float maxSpeed;
+  float maxMotorAmp;
+  float maxBatteryAmp;
+  float maxVescTemp;
+  
+  long tachometerAbs;
+  int error;
+
+  int BMS;
+  
+} vescData;
+
+struct settings {
+  uint8_t motorPoles = 14;   //1
+  uint16_t motorKV = 150;  //2
+  uint8_t motorPulley = 15;   //3
+  uint8_t wheelPulley = 66;   //4
+  uint16_t wheelDiameter = 200;  //5
+  uint8_t batteryInSeries = 10;   //6
+  int batteryCapacity = 100;
+  int usableCapacity = 90;
+  uint8_t cellType = 1;
+  uint8_t numberOfVESC = 2;    //7
+  uint8_t switchScreenDelay = 3;
+  int totalDistance = 0;
+} monitorSettings;
+
+int settingRules[11][3]
+{
+  {14, 0, 28},          // Motor Poles
+  {150, 1, 999},        // Motor KV
+  {16, 7, 45},          // Motor Pulley
+  {66, 24, 124},        // Wheel Pulley
+  {97, 30, 300},        // Wheel Diameter
+  {10, 1, 24},          // Battery in series
+  {10000, 1000, 90000}, // Battery Capacity
+  {9000, 1000, 90000}, // Battery Capacity
+  {1, 1, 2},            // Cell type
+  {1, 1, 10},           // Number of VESC's
+  {3000, 1000, 10000},  // Switch screen delay
+};
+
+float gearRatio, speedRatio, tripRatio, maxSpeed;
+float maxDeckVoltage, minDeckVoltage;
+
+unsigned long lastTimePull;
+unsigned long lastUARTpull;
+uint16_t uartPullInterval = 500;
+
+bool recievedData = false;
+
+bool fail = 0;
+
+void setup(void)
+{
+  Serial.begin(115200);
+  Serial2.begin(115200, SERIAL_8N1, 16, 17);    //16 - RX,    17 - TX
+  UART.setSerialPort(&Serial2);
+
+  calculateRatios();
+
+  delay(2000);
+}
+
+void loop()
+{
+  getVESCData();
+  getBMSData();
+
+  Serial.println(vescData.BMS); //Small debug
+}
+
+
+void getVESCData()
+{
+  vescData.avgCellVoltage = 0.0;
+  
+  if ( millis() - lastUARTpull >= uartPullInterval )
+  {
+        if ( UART.getVescValues() )
+          {
+            vescData.tempMosfet =         UART.data.tempMosfet;
+            vescData.tempMotor =          UART.data.tempMotor;
+            vescData.avgMotorCurrent =    UART.data.avgMotorCurrent;
+            vescData.avgInputCurrent =    UART.data.avgInputCurrent;
+            vescData.dutyCycleNow =       UART.data.dutyCycleNow;
+            vescData.rpm =                UART.data.rpm;
+            vescData.inpVoltage =         UART.data.inpVoltage;
+            vescData.ampHours =           UART.data.ampHours;
+            vescData.wattHours =          UART.data.wattHours;
+            vescData.tachometerAbs =      UART.data.tachometerAbs;
+            vescData.error =              UART.data.error;
+
+            vescData.maxSpeedColor =      (((((monitorSettings.motorKV * vescData.inpVoltage) / (monitorSettings.wheelPulley / monitorSettings.motorPulley)) * (monitorSettings.wheelDiameter * 3.14156))*60)/1000000);
+            vescData.avgCellVoltage +=    UART.data.inpVoltage;
+            vescData.batteryPower =       UART.data.inpVoltage * UART.data.avgInputCurrent;
+            vescData.motorPower =         UART.data.inpVoltage * UART.data.avgMotorCurrent;
+            vescData.maxSpeed =           max(vescData.maxSpeed, (vescData.rpm * speedRatio));
+            vescData.maxMotorAmp =        max(vescData.maxMotorAmp, vescData.avgMotorCurrent);
+            vescData.maxBatteryAmp =      max(vescData.maxBatteryAmp, vescData.avgInputCurrent);
+            vescData.maxVescTemp =        max(vescData.maxVescTemp, vescData.tempMosfet);
+
+            fail = 0;
+          }
+          
+        else
+          {
+            vescData.tempMosfet =    0.0;
+            vescData.tempMotor =  0.0;
+            vescData.avgMotorCurrent =    0.0;
+            vescData.avgInputCurrent =    0.0;
+            vescData.dutyCycleNow =       0.0;
+            vescData.rpm =                0;
+            vescData.inpVoltage =         0.0;
+            vescData.ampHours =           0.0;
+            vescData.wattHours =          0.0;
+            vescData.tachometerAbs =      0;
+            vescData.error =          0;
+
+            vescData.maxSpeedColor =      0.0;
+            vescData.avgCellVoltage =     0.0;
+            vescData.batteryPower =       0.0;
+            vescData.motorPower =         0.0;
+            vescData.maxSpeed =           0.0;
+            vescData.maxMotorAmp =        0.0;
+            vescData.maxBatteryAmp =      0.0;
+            vescData.maxVescTemp =        0.0;
+
+            fail = 1;
+          }
+      }
+}
+
+void getBMSData()
+{
+  if ( UART.getBMSValues(10) ) //10 is CAN number of FlexiBMS
+          {
+            vescData.BMS = UART.data.BMS;
+          }
+}
+
+String faultToString()
+{
+  switch (vescData.error)
+  {
+    case 0: return "FAULT_CODE_NONE";
+    case 1: return "FAULT_CODE_OVER_VOLTAGE";
+    case 3: return "FAULT_CODE_UNDER_VOLTAGE";
+    case 4: return "FAULT_CODE_DRV";
+    case 5: return "FAULT_CODE_ABS_OVER_CURRENT";
+    case 6: return "FAULT_CODE_OVER_TEMP_FET";
+    case 7: return "FAULT_CODE_OVER_TEMP_MOTOR";
+    default: return "Unknown fault";
+  }
+}
+
+void calculateRatios()
+{
+  gearRatio = (float)monitorSettings.motorPulley / (float)monitorSettings.wheelPulley;
+  speedRatio = (gearRatio * 60 * (float)monitorSettings.wheelDiameter* 3.14156) / (((float)monitorSettings.motorPoles / 2.0) * 1000000.0);
+  tripRatio = ((gearRatio * (float)monitorSettings.wheelDiameter * 3.14156) / (((float)14 * 3) * 1000000));
+  
+  maxDeckVoltage = 4.2 * monitorSettings.batteryInSeries;
+  minDeckVoltage = 3.0 * monitorSettings.batteryInSeries;
+
+  maxSpeed = (((((monitorSettings.motorKV * maxDeckVoltage) / (monitorSettings.wheelPulley / monitorSettings.motorPulley)) * (monitorSettings.wheelDiameter * 3.14156))*60)/1000000);
+
+
+  Serial.print("Motor pulley:            "); Serial.println(monitorSettings.motorPulley);
+  Serial.print("Wheel puley:             "); Serial.println(monitorSettings.wheelPulley);
+  Serial.print("Wheel diameter:          "); Serial.println(monitorSettings.wheelDiameter);
+
+  Serial.print("Motor poles:             "); Serial.println(monitorSettings.motorPoles);
+ 
+  Serial.print("Gear ratio:              "); Serial.println(gearRatio);
+  Serial.print("Speed ratio:             "); Serial.println(speedRatio);
+  Serial.print("Trip ratio:              "); Serial.println(tripRatio);
+  Serial.print("Max speed:               "); Serial.println(maxSpeed);
+  Serial.println(vescData.wattHours /(vescData.tachometerAbs * tripRatio));
+  Serial.print("Battery type:            "); Serial.println(monitorSettings.cellType);
+  Serial.print("Battery in series:       "); Serial.println(monitorSettings.batteryInSeries);
+  Serial.print("Battery capacity:        "); Serial.println(monitorSettings.batteryCapacity);
+  Serial.print("Battery usable capacity: "); Serial.println(monitorSettings.usableCapacity);
+  Serial.print("Max deck voltage:        "); Serial.println(maxDeckVoltage);
+  Serial.print("Min deck voltage:        "); Serial.println(minDeckVoltage);
+  
+}
